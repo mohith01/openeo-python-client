@@ -90,6 +90,11 @@ class JobDatabaseInterface(metaclass=abc.ABCMeta):
         """
         ...
 
+
+def _start_job_default(*args, **kwargs):
+    raise NotImplementedError
+
+
 class MultiBackendJobManager:
     """
     Tracker for multiple jobs on multiple backends.
@@ -253,8 +258,11 @@ class MultiBackendJobManager:
         connection.session.mount("https://", HTTPAdapter(max_retries=retries))
         connection.session.mount("http://", HTTPAdapter(max_retries=retries))
 
-    def _normalize_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure we have the required columns and the expected type for the geometry column.
+    @staticmethod
+    def __normalize_df__(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Normalize given pandas dataframe (creating a new one):
+        ensure we have the required columns.
 
         :param df: The dataframe to normalize.
         :return: a new dataframe that is normalized.
@@ -366,8 +374,8 @@ class MultiBackendJobManager:
 
     def run_jobs(
         self,
-        df: Optional[pd.DataFrame],
-        start_job: Callable[[], BatchJob],
+        df: Optional[pd.DataFrame] = None,
+        start_job: Callable[[], BatchJob] = _start_job_default,
         job_db: Union[str, Path, JobDatabaseInterface, None] = None,
         **kwargs,
     ):
@@ -450,8 +458,8 @@ class MultiBackendJobManager:
             # Resume from existing db
             _log.info(f"Resuming `run_jobs` from existing {job_db}")
         elif df is not None:
-            df = self._normalize_df(df)
-            job_db.persist(df)
+            # TODO: start showing deprecation warnings for this usage pattern?
+            job_db.initialize_from_df(df)
 
         while sum(job_db.count_by_status(statuses=["not_started", "created", "queued", "running"]).values()) > 0:
             self._job_update_loop(df, job_db, start_job)
@@ -690,6 +698,25 @@ class FullDataFrameJobDatabase(JobDatabaseInterface):
     def __init__(self):
         super().__init__()
         self._df = None
+
+    def initialize_from_df(self, df: pd.DataFrame):
+        """
+        Initialize the job database from a given dataframe,
+        which will be first normalized to be compatible
+        with :py:class:`MultiBackendJobManager` usage.
+
+        :param df: data frame with some columns that
+        :return: initialized job database.
+
+        .. versionadded:: 0.33.0
+        """
+        # TODO: option to provide custom MultiBackendJobManager subclass with custom normalize?
+        if self.exists():
+            raise RuntimeError(f"Job database {self!r} already exists.")
+        df = MultiBackendJobManager.__normalize_df__(df)
+        self.persist(df)
+        # Return self to allow chaining with constructor.
+        return self
 
     @property
     def df(self) -> pd.DataFrame:

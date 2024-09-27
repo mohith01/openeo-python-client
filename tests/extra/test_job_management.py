@@ -79,7 +79,10 @@ class TestMultiBackendJobManager:
         with mock.patch("time.sleep") as sleep:
             yield sleep
 
-    def test_basic(self, tmp_path, requests_mock, sleep_mock):
+    def test_basic_legacy(self, tmp_path, requests_mock, sleep_mock):
+        """
+        Legacy `run_jobs()` usage with explicit dataframe and output file
+        """
         manager = self.create_basic_mocked_manager(requests_mock, tmp_path)
 
         df = pd.DataFrame(
@@ -108,6 +111,42 @@ class TestMultiBackendJobManager:
         metadata_path = manager.get_job_metadata_path(job_id="job-2022")
         assert metadata_path.exists()
 
+
+    def test_basic(self, tmp_path, requests_mock, sleep_mock):
+        """
+        `run_jobs()` usage with a `CsvJobDatabase`
+        (and no explicit dataframe or output file)
+        """
+        manager = self.create_basic_mocked_manager(requests_mock, tmp_path)
+
+        df = pd.DataFrame(
+            {
+                "year": [2018, 2019, 2020, 2021, 2022],
+                # Use simple points in WKT format to test conversion to the geometry dtype
+                "geometry": ["POINT (1 2)"] * 5,
+            }
+        )
+        output_file = tmp_path / "jobs.csv"
+
+        def start_job(row, connection, **kwargs):
+            year = int(row["year"])
+            return BatchJob(job_id=f"job-{year}", connection=connection)
+
+        job_db = CsvJobDatabase(output_file).initialize_from_df(df)
+
+        manager.run_jobs(job_db=job_db, start_job=start_job)
+        assert sleep_mock.call_count > 10
+
+        result = pd.read_csv(output_file)
+        assert len(result) == 5
+        assert set(result.status) == {"finished"}
+        assert set(result.backend_name) == {"foo", "bar"}
+
+        # We expect that the job metadata was saved, so verify that it exists.
+        # Checking for one of the jobs is enough.
+        metadata_path = manager.get_job_metadata_path(job_id="job-2022")
+        assert metadata_path.exists()
+
     def test_basic_threading(self, tmp_path, requests_mock, sleep_mock):
         manager = self.create_basic_mocked_manager(requests_mock, tmp_path)
 
@@ -124,9 +163,7 @@ class TestMultiBackendJobManager:
             year = int(row["year"])
             return BatchJob(job_id=f"job-{year}", connection=connection)
 
-        job_db = CsvJobDatabase(output_file)
-        # TODO: avoid private _normalize_df API
-        job_db.persist(manager._normalize_df(df))
+        job_db = CsvJobDatabase(output_file).initialize_from_df(df)
 
         manager.start_job_thread(start_job=start_job, job_db=job_db)
         # Trigger context switch to job thread
@@ -202,28 +239,6 @@ class TestMultiBackendJobManager:
         manager.add_backend("bar", connection=openeo.connect("http://bar.test"))
         return manager
 
-    def test_normalize_df(self):
-        df = pd.DataFrame(
-            {
-                "some_number": [3, 2, 1],
-            }
-        )
-
-        df_normalized = MultiBackendJobManager()._normalize_df(df)
-
-        assert set(df_normalized.columns) == set(
-            [
-                "some_number",
-                "status",
-                "id",
-                "start_time",
-                "running_start_time",
-                "cpu",
-                "memory",
-                "duration",
-                "backend_name",
-            ]
-        )
 
     def test_manager_must_exit_when_all_jobs_done(self, tmp_path, requests_mock, sleep_mock):
         """Make sure the MultiBackendJobManager does not hang after all processes finish.
@@ -654,7 +669,7 @@ class TestCsvJobDatabase:
         ],
     )
     def test_partial_read_write(self, tmp_path, orig: pandas.DataFrame):
-        path = tmp_path / "jobs.parquet"
+        path = tmp_path / "jobs.csv"
 
         required_with_default = [
             ("status", "not_started"),
@@ -685,6 +700,34 @@ class TestCsvJobDatabase:
             assert all.loc[2,"status"] == "not_started"
         print(loaded.index)
 
+    def test_initialize_from_df(self, tmp_path):
+        orig_df = pd.DataFrame({"some_number": [3, 2, 1]})
+        path = tmp_path / "jobs.csv"
+
+        # Initialize the CSV from the dataframe
+        _ = CsvJobDatabase(path).initialize_from_df(orig_df)
+
+        # Check persisted CSV
+        assert path.exists()
+        expected_columns = {
+            "some_number",
+            "status",
+            "id",
+            "start_time",
+            "running_start_time",
+            "cpu",
+            "memory",
+            "duration",
+            "backend_name",
+        }
+
+        # Raw file content check
+        raw_columns = set(path.read_text().split("\n")[0].split(","))
+        # Higher level read
+        read_columns = set(CsvJobDatabase(path).read().columns)
+
+        assert raw_columns == expected_columns
+        assert read_columns == expected_columns
 
 
 class TestParquetJobDatabase:
@@ -712,3 +755,27 @@ class TestParquetJobDatabase:
         assert loaded.dtypes.to_dict() == orig.dtypes.to_dict()
         assert loaded.equals(orig)
         assert type(orig) is type(loaded)
+
+    def test_initialize_from_df(self, tmp_path):
+        orig_df = pd.DataFrame({"some_number": [3, 2, 1]})
+        path = tmp_path / "jobs.parquet"
+
+        # Initialize the CSV from the dataframe
+        _ = ParquetJobDatabase(path).initialize_from_df(orig_df)
+
+        # Check persisted CSV
+        assert path.exists()
+        expected_columns = {
+            "some_number",
+            "status",
+            "id",
+            "start_time",
+            "running_start_time",
+            "cpu",
+            "memory",
+            "duration",
+            "backend_name",
+        }
+
+        df_from_disk = ParquetJobDatabase(path).read()
+        assert set(df_from_disk.columns) == expected_columns
