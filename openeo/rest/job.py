@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import requests
+from osgeo import gdal
+
 
 from openeo.api.logs import LogEntry, log_level_name, normalize_log_level
 from openeo.internal.documentation import openeo_endpoint
@@ -396,6 +398,29 @@ class ResultAsset:
         return self._get_response().content
 
     # TODO: more `load` methods e.g.: load GTiff asset directly as numpy array
+    def load_geotiff(self) -> bytes:
+        """Load geotiff files as numpy"""
+        if not (self.name.lower().endswith(".tif") or self.metadata.get("type") == "image/tiff"):
+            logger.warning("Asset might not be GeoTiff")
+        bytes_array = self.load_bytes() #loads bytes
+        mem_file = gdal.FileFromMemBuffer('/vsimem/temp.tif', bytes_array)
+        main_data = gdal.Open('/vsimem/temp.tif')
+        bands = main_data.RasterCount #get the count
+        processed_array = main_data.ReadAsArray()
+        processed_array = processed_array.transpose(list(range(1,bands)) +[0])
+        # processed_array = processed_array.astype(np.float32) #Not sure about this
+
+        gdal.Unlink('/vsimem/temp.tif')
+        return processed_array
+        
+        
+        
+        
+
+        
+
+        
+        
 
 
 class MultipleAssetException(OpenEoClientException):
